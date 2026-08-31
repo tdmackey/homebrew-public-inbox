@@ -1,5 +1,11 @@
 # RFC: reliable `lei` IPC on systems without `AF_UNIX SOCK_SEQPACKET`
 
+> Superseded by the implemented
+> [descriptor-backed record design](macos-ipc-record-rfc.md). This earlier
+> topology proposal is retained as design history because its failure analysis
+> explains why ordinary framed byte streams and cross-process locks were not
+> used.
+
 Status: proposed design for upstream discussion  
 Audience: public-inbox maintainers and contributors  
 Motivation: make `lei` usable on macOS without weakening IPC guarantees on existing platforms
@@ -381,4 +387,3 @@ sent before committing to the most invasive worker-dispatch changes.
 5. Which existing worker-restart behavior should apply after a partial stream
    frame or unexpected worker exit?
 6. Which macOS release floor is acceptable once real results are available?
-
