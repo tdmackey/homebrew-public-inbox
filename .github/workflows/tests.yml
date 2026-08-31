@@ -9,6 +9,9 @@ on:
 
 permissions: {}
 
+env:
+  FORMULA_READY: "false"
+
 defaults:
   run:
     shell: bash -xeuo pipefail {0}
@@ -53,12 +56,20 @@ jobs:
       - run: brew test-bot --only-setup
       - run: brew test-bot --only-tap-syntax
 
+      - name: Verify formula release gate
+        if: env.FORMULA_READY == 'true'
+        run: |
+          if grep -Eq 'FORMULA_SCAFFOLD_INCOMPLETE|^[[:space:]]*disable!' Formula/public-inbox.rb; then
+            echo "FORMULA_READY=true requires removing the scaffold marker and disable!" >&2
+            exit 1
+          fi
+
       - name: Build and test changed formulae
-        if: github.event_name == 'pull_request' && vars.FORMULA_READY == 'true'
+        if: env.FORMULA_READY == 'true'
         run: brew test-bot --only-formulae
 
       - name: Explain source-build gate
-        if: github.event_name == 'pull_request' && vars.FORMULA_READY != 'true'
+        if: env.FORMULA_READY != 'true'
         run: |
           echo "Formula source builds are gated while the portability patch is under validation."
-          echo "Set the FORMULA_READY repository variable to true only after removing the formula scaffold guard."
+          echo "Set FORMULA_READY in this workflow to true only after removing the formula scaffold guard."

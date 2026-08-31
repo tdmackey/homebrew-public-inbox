@@ -8,14 +8,13 @@ class PublicInbox < Formula
   # FORMULA_SCAFFOLD_INCOMPLETE
   # Remove this only after the portability patch is pinned and the functional
   # test passes on macOS and Linux.
-  disable! date: "2026-08-30", because: "the macOS IPC portability patch is not pinned yet"
+  disable! date: "2026-08-30", because: "requires an unpinned macOS IPC portability patch"
 
-  # XapHelperCxx probes Xapian with pkg-config when it builds its per-user
-  # helper cache, so this is a runtime dependency rather than build-only.
-  depends_on "pkgconf"
+  # pkgconf is needed at runtime when XapHelperCxx builds its per-user cache.
   depends_on "git"
   depends_on "openssl@3"
   depends_on "perl"
+  depends_on "pkgconf"
   depends_on "sqlite"
   depends_on "xapian"
   uses_from_macos "curl"
@@ -115,11 +114,11 @@ class PublicInbox < Formula
 
   def install
     perl5lib = libexec/"lib/perl5"
-    script_dir = libexec/"bin"
+    script_dir = bin
     ENV["PERL_MM_USE_DEFAULT"] = "1"
     ENV["NO_NETWORK_TESTING"] = "1"
-    ENV["OPENSSL_PREFIX"] = Formula["openssl@3"].opt_prefix
-    ENV.prepend_path "PATH", Formula["openssl@3"].opt_bin
+    ENV["OPENSSL_PREFIX"] = formula_opt_prefix("openssl@3")
+    ENV.prepend_path "PATH", formula_opt_bin("openssl@3")
     ENV.prepend_create_path "PERL5LIB", perl5lib
     runtime_perl5lib = perl5lib.to_s
 
@@ -128,10 +127,10 @@ class PublicInbox < Formula
     end
 
     resource("xapian-bindings").stage do
-      ENV["PERL"] = Formula["perl"].opt_bin/"perl"
+      ENV["PERL"] = formula_opt_bin("perl")/"perl"
       ENV["PERL_ARCH"] = perl5lib
       ENV["PERL_LIB"] = perl5lib
-      ENV["XAPIAN_CONFIG"] = Formula["xapian"].opt_bin/"xapian-config"
+      ENV["XAPIAN_CONFIG"] = formula_opt_bin("xapian")/"xapian-config"
 
       system "./configure", *std_configure_args, "--disable-silent-rules", "--with-perl"
       system "make"
@@ -148,7 +147,7 @@ class PublicInbox < Formula
             # Upstream intentionally leaves system SQLite selection to
             # downstream packagers. Enable its guarded SQLITE_LOCATION path.
             inreplace "Makefile.PL", "if ( 0 ) {", "if ( 1 ) {"
-            args << "SQLITE_LOCATION=#{Formula["sqlite"].opt_prefix}"
+            args << "SQLITE_LOCATION=#{formula_opt_prefix("sqlite")}"
           end
           system "perl", "Makefile.PL", *args
           system "make"
@@ -163,8 +162,8 @@ class PublicInbox < Formula
       end
     end
 
-    # Force MakeMaker's script destinations under libexec. The public bin
-    # directory receives wrappers so every command gets the packaged PERL5LIB.
+    # Install into bin first; env_script_all_files moves the scripts under
+    # libexec and replaces them with wrappers carrying the packaged PERL5LIB.
     system "perl", "Makefile.PL", "INSTALL_BASE=#{libexec}",
                                  "INSTALLSCRIPT=#{script_dir}",
                                  "INSTALLSITESCRIPT=#{script_dir}",
@@ -176,14 +175,16 @@ class PublicInbox < Formula
     %w[lei public-inbox-init].each do |executable|
       odie "#{executable} was not installed under #{script_dir}" unless (script_dir/executable).exist?
     end
-    bin.env_script_all_files(script_dir, PERL5LIB: runtime_perl5lib)
+    bin.env_script_all_files(libexec/"bin", PERL5LIB: runtime_perl5lib)
   end
 
   test do
     ENV["HOME"] = testpath
+    runtime_dir = testpath/"run"
+    ENV["XDG_RUNTIME_DIR"] = runtime_dir
     ENV.prepend_path "PERL5LIB", libexec/"lib/perl5"
 
-    system Formula["perl"].opt_bin/"perl", "-MIO::Socket::SSL",
+    system formula_opt_bin("perl")/"perl", "-MIO::Socket::SSL",
            "-MMail::IMAPClient", "-e", "exit 0"
 
     inbox = testpath/"inbox"
@@ -202,9 +203,12 @@ class PublicInbox < Formula
       This message validates lei import and search.
     EOS
 
-    system bin/"lei", "import", message
-    output = shell_output("#{bin}/lei q --format=json 'm:homebrew-public-inbox-test@example.invalid'")
-    assert_match "homebrew public-inbox functional test", output
-    system bin/"lei", "daemon-kill"
+    begin
+      system bin/"lei", "import", message
+      output = shell_output("#{bin}/lei q --format=json 'm:homebrew-public-inbox-test@example.invalid'")
+      assert_match "homebrew public-inbox functional test", output
+    ensure
+      quiet_system bin/"lei", "daemon-kill" if (runtime_dir/"lei").directory?
+    end
   end
 end

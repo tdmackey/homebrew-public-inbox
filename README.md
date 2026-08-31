@@ -27,9 +27,12 @@ During the source-only validation phase, use:
 
 ```sh
 HOMEBREW_NO_INSTALL_FROM_API=1 \
-  brew install --build-from-source tdmackey/public-inbox/public-inbox
+  brew install --force --build-from-source tdmackey/public-inbox/public-inbox
 brew test tdmackey/public-inbox/public-inbox
 ```
+
+The `--force` flag is needed only while the formula carries its temporary
+bring-up `disable!` guard.
 
 ## Repository layout
 
@@ -53,7 +56,7 @@ After the formula's `TODO(PORTABILITY)` item is complete:
 1. run the functional `lei import`/`lei q` test locally on macOS and Linux;
 2. remove `disable!` and the `FORMULA_SCAFFOLD_INCOMPLETE` marker from the
    formula;
-3. set the GitHub Actions repository variable `FORMULA_READY` to `true`;
+3. set `FORMULA_READY` to `true` in `.github/workflows/tests.yml`;
 4. open a pull request and require every Homebrew CI job to pass.
 
 Add bottle publication only after source builds pass on every macOS
