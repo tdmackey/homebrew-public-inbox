@@ -1,13 +1,13 @@
 # macOS IPC compatibility and test matrix
 
-Status: proposed acceptance plan  
-Design reference: [`macos-ipc-rfc.md`](macos-ipc-rfc.md)
+Status: active acceptance plan
+Design reference: [`macos-ipc-record-rfc.md`](macos-ipc-record-rfc.md)
 
 ## Purpose
 
 This matrix defines the evidence required before a portable `lei` IPC change
 is suitable for upstream submission or use by the Homebrew tap. It covers the
-native `SOCK_SEQPACKET` path and the proposed framed `SOCK_STREAM` fallback.
+native `SOCK_SEQPACKET` path and the descriptor-backed `SOCK_STREAM` fallback.
 
 Correctness gates are absolute: no lost, duplicated, merged, or misdirected
 records; no leaked descriptors; and no transport-dependent change to command
@@ -29,9 +29,10 @@ such as descriptor exhaustion do not trigger transport fallback.
 
 | Host | Architecture | Native expectation | Required modes | Release gate |
 | --- | --- | --- | --- | --- |
-| macOS, current Homebrew-supported release | arm64 | stream fallback | native-stream | required automated or dedicated-host run |
-| macOS, oldest Homebrew-supported release | arm64 | stream fallback | native-stream | required before bottle publication |
-| macOS, supported Intel release | x86_64 | stream fallback | native-stream | required on the `macos-26-intel` hosted runner |
+| macOS 26 | arm64 | stream fallback | native-stream | required on the `macos-26` hosted runner |
+| macOS 15 | arm64 | stream fallback | native-stream | required on the `macos-15` hosted runner |
+| macOS 26 | x86_64 | stream fallback | native-stream | required on the `macos-26-intel` hosted runner |
+| macOS 15 | x86_64 | stream fallback | native-stream | required on the `macos-15-intel` hosted runner |
 | Linux, Debian stable or oldstable | x86_64 | sequence packet | native-seq, forced-stream | required automated run |
 | Linux, Debian stable | arm64 | sequence packet | native-seq, forced-stream | recommended automated run |
 | Linux, musl-based distribution | x86_64 | sequence packet | native-seq, forced-stream | required when an existing project runner is available |
@@ -50,7 +51,7 @@ Run at least one host through each reachable row:
 
 | Dimension | Variant A | Variant B | Required evidence |
 | --- | --- | --- | --- |
-| FD passing backend | `Socket::MsgHdr` | Inline::C/`PublicInbox::Spawn` | complete frame/FD suite on both; macOS must cover the packaged default |
+| FD passing backend | pure-Perl syscall | Inline::C/`PublicInbox::Spawn` | complete record/FD suite on both; macOS must cover the packaged default |
 | serialization | Sereal | Storable fallback | IPC and multiworker suite on both |
 | Xapian Perl API | `Xapian` | `Search::Xapian`, where still supported | query/import smoke coverage for packaged API |
 | Xapian helper | direct Perl binding | C/C++ helper | helper either passes stream tests or is explicitly unavailable on stream mode |
@@ -74,46 +75,40 @@ is not a pass for the Homebrew package's selected dependency set.
 | CAP-007 | stale path | leave a stale stream socket pathname, then restart | safe stale-socket recovery matching current behavior |
 | CAP-008 | future capability | force a successful sequence-packet probe while `$^O` reports Darwin | native-seq selected, proving no OS-name gate |
 
-## Stream frame codec tests
+## Stream record tests
 
-The codec suite should use a socketpair plus deterministic read/write caps so
-every split point is exercised. Proposed internal test hooks may cap one read
-or write to `N` bytes and inject `EINTR`/`EAGAIN`; they must not be installed as
-public user configuration.
+The fallback sends one notification byte with an anonymous record FD and the
+application FDs. There is no partial byte-stream frame to resynchronize.
 
 | ID | Case | Expected result |
 | --- | --- | --- |
-| FRM-001 | complete header and payload in one operation | one exact frame |
-| FRM-002 | header split at every byte boundary | one exact frame for every split |
-| FRM-003 | payload split at every byte boundary for small payloads | one exact frame |
-| FRM-004 | several frames coalesced in one kernel read buffer | frames returned separately and in order |
-| FRM-005 | zero-length logical payload | valid frame, distinct from EOF |
-| FRM-006 | maximum accepted payload | accepted without truncation |
-| FRM-007 | declared length one byte over the limit | rejected before large allocation |
-| FRM-008 | unknown magic/version | channel closed with protocol error |
-| FRM-009 | reserved flags set | rejected |
-| FRM-010 | EOF between frames | clean shutdown |
-| FRM-011 | EOF in partial header | protocol error; no descriptor leak |
-| FRM-012 | EOF in partial payload | protocol error; no deserialization |
-| FRM-013 | `EINTR` before and after progress | retry without duplicated bytes |
-| FRM-014 | `EAGAIN` before and after progress | event-loop retry from correct offset |
-| FRM-015 | sender returns every possible short count | descriptors sent once; byte tail resumes correctly |
-| FRM-016 | malformed serialized payload at valid length | deserializer error contained to channel/request |
-| FRM-017 | 10,000 alternating tiny and maximum frames | exact count, order, and checksums |
-| FRM-018 | empty completion followed by ordinary frame | no false EOF or frame merge |
+| REC-001 | ordinary payload with no application FDs | exact payload; record FD hidden |
+| REC-002 | two queued records | returned separately and in order |
+| REC-003 | payload larger than the seqpacket limit | exact payload restored from record FD |
+| REC-004 | notification without record FD | rejected without leaking FDs |
+| REC-005 | unknown record magic/version | rejected |
+| REC-006 | header count differs from application FD count | rejected and all FDs closed |
+| REC-007 | explicit receive bound exceeded | rejected before reading payload |
+| REC-008 | empty nonblocking socket | immediate `undef`/`EAGAIN` |
+| REC-009 | saturated nonblocking sender | prompt `undef`/`EAGAIN`; no phantom record |
+| REC-010 | injected `ETOOMANYREFS` | queued for timer retry; no busy writable loop |
+| REC-011 | two concurrent passed-FD writers | every large record intact and exactly once |
+| REC-012 | two readers on one endpoint | every record/FD pair assigned to one reader |
+| REC-013 | writer exits before notification | no partial record visible |
+| REC-014 | sender closes originals after send | queued record and FDs remain valid |
 
 ## Descriptor-passing tests
 
 | ID | Case | Expected result |
 | --- | --- | --- |
-| FD-001 | no descriptors | frame accepted with count zero |
-| FD-002 | one descriptor plus payload | descriptor and payload associated with same frame |
+| FD-001 | no application descriptors | record accepted with count zero |
+| FD-002 | one descriptor plus payload | descriptor and payload associated with same record |
 | FD-003 | standard input/output/error plus cwd | four descriptors arrive in documented order |
-| FD-004 | consecutive frames with different FD counts | no descriptor crosses a frame boundary |
-| FD-005 | frame header split after ancillary delivery | descriptors retained until frame completes |
-| FD-006 | short first `sendmsg` | no repeated `SCM_RIGHTS` on tail writes |
+| FD-004 | consecutive records with different FD counts | no descriptor crosses a record boundary |
+| FD-005 | record file arrives with a nonzero offset | receiver seeks to zero and reads the exact record |
+| FD-006 | one-byte notification | `sendmsg` returns one or fails without a partial record |
 | FD-007 | declared count differs from received count | reject and close every received descriptor |
-| FD-008 | `MSG_CTRUNC` | reject frame and close all visible descriptors |
+| FD-008 | `MSG_CTRUNC` | reject the notification and close all visible descriptors |
 | FD-009 | unexpected ancillary type/level | reject safely |
 | FD-010 | receiver aborts after descriptor arrival | descriptor count returns to baseline |
 | FD-011 | sender closes original immediately after send | received duplicate remains valid |
@@ -129,8 +124,8 @@ output.
 
 | ID | Topology | Load | Expected result |
 | --- | --- | --- | --- |
-| CON-001 | one client writer, daemon reader | 100,000 numbered frames | exact ordered sequence |
-| CON-002 | daemon writer, one client reader | 100,000 mixed response frames | exact ordered sequence |
+| CON-001 | one client writer, daemon reader | 100,000 numbered records | exact ordered sequence |
+| CON-002 | daemon writer, one client reader | 100,000 mixed response records | exact ordered sequence |
 | CON-003 | 32 simultaneous clients | repeated short commands | per-client isolation and correct exits |
 | CON-004 | four workqueue workers | 100,000 uniquely numbered jobs | every job assigned exactly once |
 | CON-005 | heterogeneous worker speed | one delayed worker, three normal | no global head-of-line stall; all jobs complete |
@@ -138,7 +133,7 @@ output.
 | CON-007 | `PktOp` with four producers | 25,000 records per producer | 100,000 intact records, no interleaving |
 | CON-008 | broadcasts | 10,000 numbered broadcasts to four workers | each live worker receives each broadcast once |
 | CON-009 | worker exits between jobs | queued and unassigned jobs present | other channels remain synchronized |
-| CON-010 | worker exits during a frame | deterministic partial-write injection | only failed channel closes; descriptors reclaimed |
+| CON-010 | worker exits after receiving a record | deterministic post-dequeue termination | assigned work fails cleanly; later records remain intact |
 | CON-011 | parent exits | workers blocked in receive | workers observe EOF and terminate |
 | CON-012 | client exits during long work | active worker set | work cancellation/detach matches current semantics |
 | CON-013 | rapid fork/reap cycles | at least 1,000 worker replacements | no stale event-loop registrations or FD growth |
@@ -151,22 +146,22 @@ event trace after normalizing PIDs and timing.
 
 | ID | Case | Expected result |
 | --- | --- | --- |
-| SIG-001 | client `TSTP`/`CONT` loop during output | framed writes remain intact; process resumes |
-| SIG-002 | `WINCH` while pager/MUA is active | correct process group notified; no frame splice |
+| SIG-001 | client `TSTP`/`CONT` loop during output | records remain intact; process resumes |
+| SIG-002 | `WINCH` while pager/MUA is active | correct process group notified; no record misassociation |
 | SIG-003 | `TERM`, `INT`, and `QUIT` at idle daemon | documented exit and socket cleanup |
-| SIG-004 | same signals during frame send/receive | no deadlock or malformed next frame |
+| SIG-004 | same signals during record send/receive | no deadlock or malformed next record |
 | SIG-005 | `CHLD` storm from helper processes | all children reaped; responses remain intact |
-| SIG-006 | signal arrives at every injected write offset | exact frame or clean channel failure |
+| SIG-006 | signal immediately before and after notification | exact record or no publication |
 | LIFE-001 | first client races to start daemon with 15 peers | one usable daemon; all clients connect or retry cleanly |
 | LIFE-002 | daemon dies after bind before readiness | next client recovers stale endpoint |
 | LIFE-003 | daemon restarts while old client is connected | old client gets explicit failure/EOF; new client succeeds |
 | LIFE-004 | client closes without completion message | daemon detects EOF and releases request resources |
-| LIFE-005 | partial initial argv/environment frame times out | client rejected; FDs closed |
+| LIFE-005 | client disconnects before initial notification | clean EOF; no descriptors leaked |
 | LIFE-006 | runtime directory path near `sun_path` limit | clear diagnostic or successful bounded path |
 | LIFE-007 | runtime directory permissions are too broad | existing safety policy retained |
 
-Signal handlers must not run the general frame serializer or interrupt another
-writer. Tests should verify the proposed self-pipe/event-loop handoff.
+Signal handlers that publish control records must retain the one-notification
+atomicity guarantee and must not leak the descriptor-backed record.
 
 ## `lei` functional matrix
 
@@ -190,7 +185,7 @@ temporary `HOME`, XDG directories, Git config, and stores.
 | LEI-012 | pager path | pager receives passed descriptors; client waits correctly |
 | LEI-013 | MUA execution path | command/env/FDs transferred exactly once |
 | LEI-014 | `git credential` helper path | request and response pipes routed correctly |
-| LEI-015 | client `umask` request | exact value returned in a frame |
+| LEI-015 | client `umask` request | exact value returned in a record |
 | LEI-016 | store barrier success | client does not exit before committed data is visible |
 | LEI-017 | injected store barrier failure | `child_error` reaches client once; nonzero exit |
 | LEI-018 | `lei daemon-pid`, kill, and restart | lifecycle commands target correct daemon |
@@ -211,7 +206,7 @@ Suggested existing upstream tests to run and extend include:
 - `t/lei-sigpipe.t`
 - `t/xap_helper.t`
 
-Add a focused frame-codec test rather than hiding all record edge cases inside
+Add a focused record-protocol test rather than hiding all edge cases inside
 end-to-end `lei` tests.
 
 ## Xapian helper matrix
@@ -226,7 +221,7 @@ end-to-end `lei` tests.
 | XAP-006 | four helper workers | mixed fast/slow queries | each request handled once; output FD correct |
 | XAP-007 | helper worker dies mid-query | caller receives failure; later queries remain usable |
 | XAP-008 | helper parent dies | clients see EOF/failure without hang |
-| XAP-009 | query request exceeds normal packet size | bounded side stream or framed large request succeeds |
+| XAP-009 | query request exceeds normal packet size | descriptor-backed large record succeeds |
 | XAP-010 | read-only daemon retry setting | error/retry behavior matches native path |
 
 The Homebrew acceptance result must state which helper mode the packaged build
@@ -236,16 +231,14 @@ uses. An untested automatic helper path is not acceptable.
 
 Tests need deterministic faults rather than hoping for kernel timing:
 
-- cap each underlying read/write to 1, 2, header-size-minus-1, header size,
-  payload-size-minus-1, and a pseudorandom sequence;
-- inject `EINTR` and `EAGAIN` before progress and after partial progress;
-- pause selected workers after header receipt and after ancillary receipt;
-- close peers at each header/payload offset;
+- inject `EINTR`, `EAGAIN`, and descriptor-pressure errors around `sendmsg`;
+- pause selected workers before and after notification receipt;
+- terminate writers immediately before and after the atomic notification;
 - kill a worker after dequeue, during payload receipt, during execution, and
   during response;
 - reduce socket buffers to trigger backpressure;
 - lower `RLIMIT_NOFILE` in a subprocess to exercise descriptor failures;
-- corrupt magic, lengths, flags, descriptor count, and serialized payload;
+- corrupt magic, record-file type/size, descriptor count, and serialized payload;
 - run with slow readers and event-loop one-shot wakeups;
 - repeat with Sereal and Storable.
 
@@ -306,7 +299,7 @@ For every matrix run, retain:
 
 ### Required before sending a non-RFC patch series
 
-- Frame and descriptor unit suites pass under forced-stream Linux.
+- Record and descriptor unit suites pass under forced-stream Linux.
 - Existing IPC/lei tests pass under native-seq Linux.
 - One real Apple Silicon macOS run completes the focused suite.
 - Multi-producer `PktOp` and multiworker workqueue stress tests show zero loss
