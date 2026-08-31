@@ -84,8 +84,10 @@ or completion records whose loss can corrupt state or leave a command hung.
 
 ## Goals
 
-- Run the full `lei` daemon and worker architecture on current supported
-  macOS releases, on both Apple Silicon and Intel where available.
+- Run the full `lei` daemon and worker architecture on the current Apple
+  Silicon macOS release.
+- Preserve capability-based runtime portability on other macOS releases and
+  architectures where possible.
 - Preserve the native `SOCK_SEQPACKET` path and its performance.
 - Detect capabilities at runtime rather than hard-coding operating-system
   names.

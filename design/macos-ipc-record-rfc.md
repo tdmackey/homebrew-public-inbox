@@ -151,7 +151,7 @@ or macOS-only framework. It retains Perl 5.12 syntax and is testable on Linux.
 The source branch gates publication on:
 
 - native sequence-packet and forced-stream Linux runs;
-- automatic fallback on macOS 15 and 26, Apple Silicon and Intel;
+- automatic fallback on the current Apple Silicon macOS runner;
 - both pure-Perl syscall and Inline::C SCM backends;
 - 10-descriptor success and deterministic 11-descriptor rejection;
 - immediate nonblocking `EAGAIN` with no phantom receive record;
@@ -180,9 +180,9 @@ The proposed product source series is:
 ```
 
 Generate the series with `git format-patch --cover-letter`, include native and
-forced Linux results plus all macOS runner results, and send the plain-text
-series with `git send-email`. The Homebrew tap pins the reviewed fork commit
-only until upstream merges and releases the change.
+forced Linux results plus the current Apple Silicon macOS runner result, and
+send the plain-text series with `git send-email`. The Homebrew tap pins the
+reviewed fork commit only until upstream merges and releases the change.
 
 ## Upstream questions
 
