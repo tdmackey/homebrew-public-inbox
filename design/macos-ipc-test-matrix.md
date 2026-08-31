@@ -29,10 +29,7 @@ such as descriptor exhaustion do not trigger transport fallback.
 
 | Host | Architecture | Native expectation | Required modes | Release gate |
 | --- | --- | --- | --- | --- |
-| macOS 26 | arm64 | stream fallback | native-stream | required on the `macos-26` hosted runner |
-| macOS 15 | arm64 | stream fallback | native-stream | required on the `macos-15` hosted runner |
-| macOS 26 | x86_64 | stream fallback | native-stream | required on the `macos-26-intel` hosted runner |
-| macOS 15 | x86_64 | stream fallback | native-stream | required on the `macos-15-intel` hosted runner |
+| Current stable macOS (`macos-latest`) | arm64 | stream fallback | native-stream | required automated run |
 | Linux, Debian stable or oldstable | x86_64 | sequence packet | native-seq, forced-stream | required automated run |
 | Linux, Debian stable | arm64 | sequence packet | native-seq, forced-stream | recommended automated run |
 | Linux, musl-based distribution | x86_64 | sequence packet | native-seq, forced-stream | required when an existing project runner is available |
@@ -41,9 +38,12 @@ such as descriptor exhaustion do not trigger transport fallback.
 | NetBSD | supported architecture | probe decides | native mode, forced-stream | periodic/manual |
 | DragonFly BSD | supported architecture | probe decides | native mode, forced-stream | periodic/manual |
 
+Older macOS releases and Intel remain best-effort compatibility targets; the
+tap does not continuously test or publish support claims for them.
+
 Record the exact OS build, kernel, Perl, Git, Xapian, SQLite, serializer, and
 descriptor-passing backend with every result. Do not use a generic "macOS"
-result to cover both architectures.
+result to claim coverage of untested releases or architectures.
 
 ## Dependency and implementation dimensions
 
@@ -319,9 +319,8 @@ For every matrix run, retain:
 
 ### Required before publishing Homebrew bottles
 
-- Apple Silicon tests pass on the oldest and current Homebrew-supported macOS
-  releases.
-- An Intel macOS run passes while Intel bottles are offered.
+- Apple Silicon tests pass on the current GitHub-hosted macOS runner.
+- Publish bottles only for continuously tested OS and architecture combinations.
 - The exact bottled dependency set passes the FD backend, serializer, Xapian,
   import, query, pager/MUA, signal, and daemon-lifecycle scenarios.
 - A clean-machine install passes `brew test` plus a representative real `lei`

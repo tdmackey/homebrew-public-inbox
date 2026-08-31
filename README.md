@@ -63,11 +63,12 @@ packaging model.
 ## Validation and upstreaming
 
 The release gate covers Linux's native `SOCK_SEQPACKET` path, a forced
-`SOCK_STREAM` fallback on Linux, and native fallback on Intel and Apple Silicon
-macOS 15 and 26. Every formula test initializes and indexes a v2 inbox. On
+`SOCK_STREAM` fallback on Linux, and native fallback on GitHub's current Apple
+Silicon macOS runner. Every formula test initializes and indexes a v2 inbox. On
 macOS, it also imports a message with `lei`, queries it back, and shuts down the
 per-user daemon. Linux `lei` coverage runs in the source fork's CI outside
-Homebrew's more restrictive formula-test sandbox.
+Homebrew's more restrictive formula-test sandbox. Older macOS releases and
+Intel remain best-effort compatibility targets rather than continuous gates.
 
 The three source commits are deliberately small enough for public-inbox's
 email-based review flow. See the record-transport RFC for the proposed
