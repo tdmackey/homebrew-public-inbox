@@ -76,7 +76,12 @@ jobs:
 
       - name: Run test-bot formula checks
         if: env.FORMULA_READY == 'true'
-        run: brew test-bot --only-formulae
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            brew test-bot --only-formulae tdmackey/public-inbox/public-inbox
+          else
+            brew test-bot --only-formulae
+          fi
 
       # test-bot skips formulae with unbottled dependencies while still exiting
       # successfully. Exercise the tap directly so a green job proves that the
