@@ -168,8 +168,9 @@ The detailed host and fault matrix is in
 ## Upstream submission
 
 public-inbox accepts patches by email at `meta@public-inbox.org`. The fork
-keeps the source work based directly on upstream `master` and keeps GitHub-only
-CI in a separate commit. The proposed source series is:
+keeps the source work based directly on upstream `master`. A separate fork-only
+commit contains the GitHub CI harness and a Darwin test-expectation adjustment.
+The proposed product source series is:
 
 ```text
 [PATCH 0/3] lei: support reliable IPC without SOCK_SEQPACKET

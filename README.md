@@ -8,8 +8,9 @@ command-line interface on macOS, with Linux kept as a regression platform.
 The formula installs public-inbox and `lei` from an immutable commit in the
 [`tdmackey/public-inbox`](https://github.com/tdmackey/public-inbox) portability
 fork. That commit is upstream `master` plus three focused compatibility
-commits; GitHub-only CI is kept in a fourth commit so the source series can be
-submitted upstream without tap-specific changes.
+commits. A fourth fork-only commit contains the GitHub CI harness and a Darwin
+test-expectation adjustment; it is excluded from the proposed upstream product
+series.
 
 All source and Perl/Xapian resources are pinned to hash-verified archives. The
 build is network-isolated after Homebrew fetches those resources. Bottles are
@@ -50,9 +51,10 @@ lei --help
   proposal and its alternatives analysis as design history.
 - `design/macos-ipc-test-matrix.md` defines the macOS/Linux release gates.
 
-The source fork retains the canonical public-inbox history and an `upstream`
-remote pointing to `https://public-inbox.org/public-inbox.git`. The formula is
-pinned to product commit
+The source fork retains the canonical public-inbox history. The maintainer
+checkout also configures an `upstream` remote pointing to
+`https://public-inbox.org/public-inbox.git`. The formula is pinned to product
+commit
 [`7b106f5f`](https://github.com/tdmackey/public-inbox/commit/7b106f5fa70585820cfeb937a62ad7ac25ede312),
 not a moving branch. When upstream merges and releases the portable IPC work,
 the formula can return to the canonical release archive without changing its
