@@ -1,14 +1,18 @@
 class PublicInbox < Formula
   desc "Archive-first mailing-list toolkit, including lei"
   homepage "https://public-inbox.org/"
-  url "https://public-inbox.org/public-inbox.git/snapshot/public-inbox-2.1.0.tar.gz"
-  sha256 "03da8788e62e24e5230eabb8ea0a7206e95ee3716c810107d05ee66995236deb"
+  url "https://github.com/tdmackey/public-inbox/releases/download/homebrew-source-7b106f5f/public-inbox-2.1.0-62-g7b106f5f.tar.gz"
+  version "2.1.0-62-g7b106f5f"
+  sha256 "a702d9446e6543b391ace86284cc3e4e72e49f68c0a3ebc19b18bf80be4d5993"
   license "AGPL-3.0-or-later"
 
-  # FORMULA_SCAFFOLD_INCOMPLETE
-  # Remove this only after the portability patch is pinned and the functional
-  # test passes on macOS and Linux.
-  disable! date: "2026-08-30", because: "requires an unpinned macOS IPC portability patch"
+  # Temporary immutable, case-safe fork snapshot. It omits only upstream's
+  # install/ package-manager helpers, whose name collides with the required
+  # INSTALL document on default macOS filesystems. Return to an upstream
+  # release archive after the portable IPC series is merged and released.
+  livecheck do
+    skip "pinned development snapshot"
+  end
 
   # pkgconf is needed at runtime when XapHelperCxx builds its per-user cache.
   depends_on "git"
@@ -30,19 +34,17 @@ class PublicInbox < Formula
     sha256 "f52ec189f13b4fa66ea625a6eb94bb32dd651b9ec806be6a911dda54cbe3875c"
   end
 
-  # TODO(PORTABILITY): Add the immutable, upstreamable macOS IPC patch after
-  # its commit and downloaded patch have been verified. Do not pin a branch.
-  #
-  # patch do
-  #   url "https://github.com/tdmackey/public-inbox/commit/<FULL_COMMIT_SHA>.patch?full_index=1"
-  #   sha256 "<PATCH_SHA256>"
-  # end
-
   # Runtime/build closure for the upstream `lei` dependency profile. These are
   # ordered so every non-core prerequisite is installed before its consumer.
   resource "MIME-Base32" do
     url "https://cpan.metacpan.org/authors/id/R/RE/REHSACK/MIME-Base32-1.303.tar.gz"
     sha256 "ab21fa99130e33a0aff6cdb596f647e5e565d207d634ba2ef06bdbef50424e99"
+  end
+
+  # Darwin's struct flock layout is not built into public-inbox.
+  resource "File-FcntlLock" do
+    url "https://cpan.metacpan.org/authors/id/J/JT/JTT/File-FcntlLock-0.22.tar.gz"
+    sha256 "9a9abb2efff93ab73741a128d3f700e525273546c15d04e7c51c704ab09dbcdf"
   end
 
   resource "URI" do
@@ -110,7 +112,10 @@ class PublicInbox < Formula
     sha256 "093c97fac15b47a8fe4d2936ef2df377abf77cc8ab74092d2128bb945d1fb46f"
   end
 
-  deny_network_access!
+  # lei's daemon uses a local AF_UNIX socket during the functional test.
+  # Homebrew's Darwin network sandbox blocks that bind along with internet
+  # access, so keep the source build isolated while allowing local test IPC.
+  deny_network_access! :build
 
   def install
     perl5lib = libexec/"lib/perl5"
@@ -122,7 +127,9 @@ class PublicInbox < Formula
     ENV.prepend_create_path "PERL5LIB", perl5lib
     runtime_perl5lib = perl5lib.to_s
 
-    if Formula["xapian"].version != resource("xapian-bindings").version
+    xapian_config = formula_opt_bin("xapian")/"xapian-config"
+    xapian_version = Utils.safe_popen_read(xapian_config, "--version").split.last
+    if xapian_version != resource("xapian-bindings").version.to_s
       odie "xapian-bindings resource needs to be updated"
     end
 
@@ -184,31 +191,38 @@ class PublicInbox < Formula
     ENV["XDG_RUNTIME_DIR"] = runtime_dir
     ENV.prepend_path "PERL5LIB", libexec/"lib/perl5"
 
-    system formula_opt_bin("perl")/"perl", "-MIO::Socket::SSL",
-           "-MMail::IMAPClient", "-e", "exit 0"
+    system formula_opt_bin("perl")/"perl", "-MFile::FcntlLock",
+           "-MIO::Socket::SSL", "-MMail::IMAPClient", "-e", "exit 0"
 
     inbox = testpath/"inbox"
     system bin/"public-inbox-init", "-V2", "brew-test", inbox,
            "https://example.invalid/brew-test", "brew-test@example.invalid"
     assert_path_exists inbox/"git/0.git"
+    system bin/"public-inbox-index", inbox
 
-    message = testpath/"message.eml"
-    message.write <<~EOS
-      From: Homebrew Test <sender@example.invalid>
-      To: brew-test@example.invalid
-      Date: Thu, 1 Jan 1970 00:00:00 +0000
-      Message-ID: <homebrew-public-inbox-test@example.invalid>
-      Subject: homebrew public-inbox functional test
+    # Homebrew's Linux bubblewrap sandbox denies opening `/`, which the
+    # persistent lei/store worker uses to release its caller's working
+    # directory. The source CI covers lei on Linux outside that policy; the
+    # tap's target macOS platforms exercise the complete daemon workflow.
+    if OS.mac?
+      message = testpath/"message.eml"
+      message.write <<~EOS
+        From: Homebrew Test <sender@example.invalid>
+        To: brew-test@example.invalid
+        Date: Thu, 1 Jan 1970 00:00:00 +0000
+        Message-ID: <homebrew-public-inbox-test@example.invalid>
+        Subject: homebrew public-inbox functional test
 
-      This message validates lei import and search.
-    EOS
+        This message validates lei import and search.
+      EOS
 
-    begin
-      system bin/"lei", "import", message
-      output = shell_output("#{bin}/lei q --format=json 'm:homebrew-public-inbox-test@example.invalid'")
-      assert_match "homebrew public-inbox functional test", output
-    ensure
-      quiet_system bin/"lei", "daemon-kill" if (runtime_dir/"lei").directory?
+      begin
+        system bin/"lei", "import", message
+        output = shell_output("#{bin}/lei q --format=json 'm:homebrew-public-inbox-test@example.invalid'")
+        assert_match "homebrew public-inbox functional test", output
+      ensure
+        quiet_system bin/"lei", "daemon-kill" if (runtime_dir/"lei").directory?
+      end
     end
   end
 end

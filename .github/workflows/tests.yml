@@ -9,8 +9,12 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: homebrew-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
-  FORMULA_READY: "false"
+  FORMULA_READY: "true"
 
 defaults:
   run:
@@ -22,6 +26,8 @@ jobs:
       fail-fast: false
       matrix:
         os:
+          - macos-15
+          - macos-15-intel
           - macos-26
           - macos-26-intel
         include:
@@ -41,8 +47,10 @@ jobs:
     steps:
       - name: Set up Homebrew
         id: set-up-homebrew
-        uses: Homebrew/actions/setup-homebrew@fd832223f9f99ebf0244dd20658680e5d4aca049 # 2026.08.03.2
+        uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869 # 2026.08.24.1
         with:
+          core: true
+          cask: false
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache Homebrew Bundler RubyGems
@@ -59,14 +67,42 @@ jobs:
       - name: Verify formula release gate
         if: env.FORMULA_READY == 'true'
         run: |
-          if grep -Eq 'FORMULA_SCAFFOLD_INCOMPLETE|^[[:space:]]*disable!' Formula/public-inbox.rb; then
+          formula_file="$(brew --repo tdmackey/public-inbox)/Formula/public-inbox.rb"
+          test -f "$formula_file"
+          if grep -Eq 'FORMULA_SCAFFOLD_INCOMPLETE|^[[:space:]]*disable!' "$formula_file"; then
             echo "FORMULA_READY=true requires removing the scaffold marker and disable!" >&2
             exit 1
           fi
 
-      - name: Build and test changed formulae
+      - name: Run test-bot formula checks
         if: env.FORMULA_READY == 'true'
         run: brew test-bot --only-formulae
+
+      # test-bot skips formulae with unbottled dependencies while still exiting
+      # successfully. Exercise the tap directly so a green job proves that the
+      # formula can be built, linked, and run on this runner.
+      - name: Install formula from source
+        if: env.FORMULA_READY == 'true'
+        env:
+          HOMEBREW_NO_INSTALL_FROM_API: "1"
+        run: |
+          formula=tdmackey/public-inbox/public-inbox
+          if brew list --formula "$formula" >/dev/null 2>&1
+          then
+            # test-bot may leave its bottle installed after removing its
+            # dependencies. Remove only that runner-local copy so this gate
+            # always performs the promised source build.
+            brew uninstall --force --ignore-dependencies "$formula"
+          fi
+          brew install --build-from-source "$formula"
+
+      - name: Check formula linkage
+        if: env.FORMULA_READY == 'true'
+        run: brew linkage --test --strict tdmackey/public-inbox/public-inbox
+
+      - name: Test installed formula
+        if: env.FORMULA_READY == 'true'
+        run: brew test tdmackey/public-inbox/public-inbox
 
       - name: Explain source-build gate
         if: env.FORMULA_READY != 'true'
