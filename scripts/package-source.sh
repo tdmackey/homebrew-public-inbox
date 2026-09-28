@@ -11,11 +11,12 @@ fi
 source_repo=$1
 version=$3
 case "${version}" in
-  ''|*/*|*\\*|*'
+  '' | */* | *\\* | *'
 '*)
     echo "VERSION must be one nonempty path component without control characters" >&2
     exit 2
     ;;
+  *) ;;
 esac
 if printf '%s' "${version}" | LC_ALL=C grep -q '[[:cntrl:]]'
 then
@@ -68,7 +69,7 @@ then
   exit 1
 fi
 if printf '%s\n' "${listing}" | grep -Fqx \
-  -e "public-inbox-${version}/install" -e "public-inbox-${version}/install/"
+    -e "public-inbox-${version}/install" -e "public-inbox-${version}/install/"
 then
   echo "archive unexpectedly contains the case-colliding install/ directory" >&2
   exit 1

@@ -8,8 +8,7 @@ test_dir=$(mktemp -d "${TMPDIR:-/tmp}/public-inbox-package-test.XXXXXX")
 trap 'rm -rf "${test_dir}"' 0
 trap 'exit 1' 1 2 15
 
-fail()
-{
+fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
@@ -68,7 +67,10 @@ git -C "${repo}" config tar.umask 0077
 printf 'README export-ignore\n' >"${test_dir}/user-attributes"
 git -C "${repo}" config core.attributesFile "${test_dir}/user-attributes"
 printf 'INSTALL export-ignore\n' >"${repo}/.gitattributes"
-(umask 077; sh "${package_script}" "${repo}" "${commit}" 1.0 "${test_dir}/repeat.tar.gz") >/dev/null
+(
+  umask 077
+  sh "${package_script}" "${repo}" "${commit}" 1.0 "${test_dir}/repeat.tar.gz"
+) >/dev/null
 cmp "${output}" "${test_dir}/repeat.tar.gz" || fail 'archive is not reproducible'
 
 # Version labels are literal strings, including regular-expression characters.
@@ -76,8 +78,7 @@ sh "${package_script}" "${repo}" "${commit}" '1.0[rc1]' "${test_dir}/literal.tar
 tar -tf "${test_dir}/literal.tar.gz" | grep -Fqx 'public-inbox-1.0[rc1]/INSTALL' || fail 'version was not literal'
 
 cp "${output}" "${test_dir}/original.tar.gz"
-expect_failure()
-{
+expect_failure() {
   if sh "${package_script}" "$@" >"${test_dir}/stdout" 2>"${test_dir}/stderr"
   then
     fail "unexpected success: $*"
