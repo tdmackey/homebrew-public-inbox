@@ -1,367 +1,338 @@
-# RFC: reliable `lei` IPC on systems without `AF_UNIX SOCK_SEQPACKET`
+# Historical RFC: one reader and one writer per `lei` stream
 
-> Superseded by the implemented
-> [descriptor-backed record design](macos-ipc-record-rfc.md). This earlier
-> topology proposal is retained as design history because its failure analysis
-> explains why ordinary framed byte streams and cross-process locks were not
-> used.
+Status: superseded proposal. Retained as design history.
 
-Status: proposed design for upstream discussion  
-Audience: public-inbox maintainers and contributors  
-Motivation: make `lei` usable on macOS without weakening IPC guarantees on existing platforms
+Audience: public-inbox maintainers and contributors.
 
-## Summary
+The [record-file design](macos-ipc-record-rfc.md) replaces this proposal.
+The implemented transport keeps shared endpoints. It does not use the
+per-worker streams or frame format described below.
 
-`lei` currently depends on `AF_UNIX SOCK_SEQPACKET` for its client socket,
-internal work queues, operation notifications, and the Xapian helper. macOS
-exports the `SOCK_SEQPACKET` constant but XNU does not implement that socket
-type for the UNIX domain, so the first `socket(2)` call fails at runtime.
+## Purpose
 
-This RFC proposes:
+This proposal examined a stream fallback for `lei` on macOS. It explains
+why a length prefix alone cannot preserve records on shared byte streams.
+The requirements and procedures below belong to this earlier proposal.
 
-1. Keep the existing `SOCK_SEQPACKET` implementation unchanged whenever a
-   runtime capability probe succeeds.
-2. Add a framed `AF_UNIX SOCK_STREAM` fallback.
-3. On the stream path, give every byte stream exactly one record reader and
-   one record writer. Use one connection per client and either a parent broker
-   or one socketpair per worker/producer for internal IPC.
-4. Preserve descriptor passing, backpressure, command boundaries, failure
-   propagation, and worker concurrency.
+IPC means interprocess communication. A record is one complete logical
+message. An FD is a file descriptor for an open file, pipe, or socket.
+`SCM_RIGHTS` is socket control data that transfers FDs between processes.
+Backpressure makes a sender wait when the receiver cannot accept more data.
 
-The proposal deliberately does not replace `SOCK_SEQPACKET` globally and does
-not use `SOCK_DGRAM` as the compatibility transport.
+## Starting point
 
-## Current contract
+Before the portability change, `lei` required `AF_UNIX SOCK_SEQPACKET` for
+client sockets, work queues, operation notifications, and the Xapian helper.
+Darwin defines the constant but does not implement that UNIX socket type.
+Thus, socket creation fails on the affected macOS systems.
 
-The socket type is not an incidental implementation choice. Current code
-relies on all of these properties:
+The proposal had four parts:
 
-- one send corresponds to one receive;
-- records are delivered in order and are not silently discarded;
-- `SCM_RIGHTS` descriptors travel with the associated record;
-- closing a peer produces connection-style shutdown behavior;
-- a shared receive endpoint distributes complete work records among workers;
-- a shared send endpoint accepts complete records from multiple producers;
-- backpressure is visible to blocking and nonblocking senders.
+1. Keep the existing sequence-packet path when a runtime probe succeeds.
+2. Add an `AF_UNIX SOCK_STREAM` transport with explicit record framing.
+3. Give each stream one reader and one writer. Use one connection per client.
+   Use a parent broker or separate worker and producer socket pairs internally.
+4. Preserve descriptor passing, backpressure, record boundaries, failure
+   reporting, and concurrent workers.
 
-The current design is documented in
-[`Documentation/lei-daemon.pod`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/refs/heads/master/Documentation/lei-daemon.pod),
-which cites reliability, load distribution, and avoidance of stream parsers as
-reasons for using `SOCK_SEQPACKET`.
+## Required IPC behavior
 
-The two shared-endpoint patterns are visible in current upstream code:
+The original code relies on these properties:
 
-- [`PublicInbox::IPC`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/refs/heads/master/lib/PublicInbox/IPC.pm)
-  uses a single producer and multiple workers for work distribution.
-- [`PublicInbox::PktOp`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/refs/heads/master/lib/PublicInbox/PktOp.pm)
-  permits multiple producers and one consumer.
+- One send corresponds to one receive.
+- Records arrive in order, without silent loss.
+- `SCM_RIGHTS` descriptors remain associated with their record.
+- The receiver detects when its peer closes the connection.
+- Workers can share an endpoint and receive complete work records.
+- Producers can share an endpoint and send complete records.
+- Blocking and nonblocking senders can detect backpressure.
 
-The client protocol and Xapian helper also assume records:
+The references below use upstream commit
+`6d8fd320c878a99154e6b87c0360d56b7db46b27`, before the three portability
+commits. They describe the starting point for this analysis.
 
-- [`script/lei`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/refs/heads/master/script/lei)
-- [`PublicInbox::LEI`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/refs/heads/master/lib/PublicInbox/LEI.pm)
-- [`PublicInbox::XapClient`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/refs/heads/master/lib/PublicInbox/XapClient.pm)
-- [`PublicInbox::XapHelper`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/refs/heads/master/lib/PublicInbox/XapHelper.pm)
-- [`xap_helper.h`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/refs/heads/master/lib/PublicInbox/xap_helper.h)
+[`Documentation/lei-daemon.pod`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/6d8fd320c878a99154e6b87c0360d56b7db46b27/Documentation/lei-daemon.pod)
+explains the use of sequence packets for reliability and work distribution.
+The shared endpoints appear in:
+
+- [`PublicInbox::IPC`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/6d8fd320c878a99154e6b87c0360d56b7db46b27/lib/PublicInbox/IPC.pm):
+  one producer and several workers.
+- [`PublicInbox::PktOp`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/6d8fd320c878a99154e6b87c0360d56b7db46b27/lib/PublicInbox/PktOp.pm):
+  several producers and one consumer.
+
+These components also depend on record boundaries:
+
+- [`script/lei`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/6d8fd320c878a99154e6b87c0360d56b7db46b27/script/lei)
+- [`PublicInbox::LEI`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/6d8fd320c878a99154e6b87c0360d56b7db46b27/lib/PublicInbox/LEI.pm)
+- [`PublicInbox::XapClient`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/6d8fd320c878a99154e6b87c0360d56b7db46b27/lib/PublicInbox/XapClient.pm)
+- [`PublicInbox::XapHelper`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/6d8fd320c878a99154e6b87c0360d56b7db46b27/lib/PublicInbox/XapHelper.pm)
+- [`xap_helper.h`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/6d8fd320c878a99154e6b87c0360d56b7db46b27/lib/PublicInbox/xap_helper.h)
 
 ## Darwin evidence
 
-Apple's current XNU source is explicit about the gap:
+Apple's XNU source supports the portability concern:
 
-- The UNIX-domain implementation lists `SEQPACKET` and `RDM` as TODO items in
-  [`uipc_usrreq.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/uipc_usrreq.c#L176-L182).
-- Apple's [`unix(4)` source](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man4/unix.4)
-  documents UNIX-domain `SOCK_STREAM` and `SOCK_DGRAM`, but not
+- [`uipc_usrreq.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/uipc_usrreq.c)
+  lists `SEQPACKET` and `RDM` as work still to do for UNIX sockets.
+- [`unix(4)`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man4/unix.4)
+  documents UNIX `SOCK_STREAM` and `SOCK_DGRAM`. It does not list
   `SOCK_SEQPACKET`.
-- XNU processes ancillary control data before branching on stream versus
-  datagram handling, so its implementation can pass `SCM_RIGHTS` on local
-  datagrams. However, the same source explicitly says datagrams can be lost
-  when the receiver queue overflows
-  ([`uipc_send`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/uipc_usrreq.c#L498-L546)).
+- In `uipc_send`, XNU processes control data before it selects the stream or
+  datagram path. Thus, the implementation can transfer `SCM_RIGHTS` with local
+  datagrams. Its comment warns of datagram loss when a receive queue is full.
+  See [`uipc_send`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/uipc_usrreq.c#L498-L546).
 
-The last point makes `SOCK_DGRAM` an unsuitable semantic replacement for work
-or completion records whose loss can corrupt state or leave a command hung.
+This evidence does not establish a safe datagram replacement for work or
+completion records. Losing such a record can leave state incomplete or a
+command waiting indefinitely. A port must test the selected transport's
+behavior on each supported system.
 
-## Goals
+## Goals and limits
 
-- Run the full `lei` daemon and worker architecture on the current Apple
-  Silicon macOS release.
-- Preserve capability-based runtime portability on other macOS releases and
-  architectures where possible.
-- Preserve the native `SOCK_SEQPACKET` path and its performance.
-- Detect capabilities at runtime rather than hard-coding operating-system
-  names.
-- Preserve `SCM_RIGHTS`, command ordering, exact record boundaries, exit
-  status, signal forwarding, and disconnect detection.
-- Support multiple workers on the fallback path.
-- Add no network-facing protocol and no cross-host transport.
-- Add no required non-core Perl or platform-specific framework dependency.
-- Remain compatible with the project's Perl 5.12 baseline.
-- Make the fallback testable on Linux even when `SOCK_SEQPACKET` is available.
+The proposal aimed to:
 
-## Non-goals
+- Run the full `lei` daemon and its workers on Apple Silicon macOS.
+- Select a transport by runtime capability, including on other macOS systems.
+- Preserve the native sequence-packet path and its performance.
+- Preserve FD transfer, ordering, record boundaries, exit status, signal
+  forwarding, and disconnect detection.
+- Support several workers on the stream path.
+- Keep communication local to the same host.
+- Add no required non-core Perl module or platform framework.
+- Keep the Perl 5.12 baseline.
+- Let Linux tests force the stream path.
 
-- Removing or deprecating `SOCK_SEQPACKET`.
-- Defining a stable external IPC API.
-- Supporting untrusted remote clients.
-- Replacing the existing serializer.
-- Introducing Mach IPC, XPC, launchd activation, or a macOS-only helper.
-- Solving unrelated event-notification portability work.
+The proposal did not define a stable external API or support remote clients.
+It did not replace the serializer or deprecate sequence packets. It also did
+not add Mach IPC, XPC, launchd activation, or unrelated event-notification work.
 
 ## Alternatives considered
 
-### Substitute `SOCK_STREAM` everywhere
+### Replace sequence packets with streams everywhere
 
-Rejected. Framing alone does not make a shared byte stream behave like a
-packet socket.
+The proposal rejected this option. A byte stream has no record boundaries.
+One reader can consume a header while another consumes its payload. Writers
+can also mix parts of their frames.
 
-With multiple readers, one worker can consume a header and a second worker can
-consume its payload. With multiple writers, frames can interleave. A stream
-`sendmsg(2)` may also return a short count: the descriptors have already been
-transferred once, so resending the original message can duplicate data or
-descriptors, while sending only the remaining bytes allows another writer to
-splice its frame between them.
+A stream `sendmsg(2)` call can return a short byte count after transferring
+the descriptors. Sending the original message again can duplicate data or
+FDs. Sending only the remaining bytes still lets another writer interrupt the
+frame unless one writer owns the stream.
 
-A cross-process receive lock would still leave the stream desynchronized if a
-worker died after consuming part of a record. Locks would also add starvation
-and crash-recovery behavior that `SOCK_SEQPACKET` does not require.
+A receive lock does not solve recovery. If a worker exits after reading part
+of a frame, the next worker cannot safely locate the next record. Locks also
+require rules for starvation and process failure.
 
-### Use `SOCK_DGRAM` socketpairs internally
+### Use internal datagram socket pairs
 
-Not recommended as the reliable fallback. It preserves boundaries and fits
-the current shared-reader/shared-writer topology, but XNU documents queue
-overflow loss. Datagram sockets also lack orderly EOF semantics, have stricter
-message-size limits, and require explicit peer-liveness and shutdown records.
+Datagrams preserve boundaries and fit shared endpoints. However, XNU warns
+of queue-overflow loss. Datagrams also lack orderly EOF behavior. Their size
+limits and peer shutdown behavior need separate handling.
 
-Acknowledgements, retransmission, message identifiers, and duplicate
-suppression could create a reliable protocol over datagrams, but non-idempotent
-work execution makes this difficult. That machinery would be at least as
-complex as a stream broker while retaining weaker kernel guarantees.
+A reliable layer would need acknowledgements, retries, record identifiers,
+and duplicate detection. Some work cannot safely run twice. That makes retry
+handling at least as complex as a stream broker.
 
-### Force one worker on macOS
+### Limit macOS to one worker
 
-Useful only as a short-lived diagnostic mode. It reduces the shared-reader
-problem but does not remove multiple producers, signal-handler writes, partial
-`sendmsg` behavior, or Xapian-helper assumptions. It also silently changes
-`lei` performance and is not a complete port.
+A single worker can help with diagnosis. It does not solve multiple producers,
+signal-handler writes, partial sends, or Xapian helper assumptions. It also
+reduces concurrency, so the proposal did not treat it as a complete port.
 
-### Add a platform-specific Mach or XPC transport
+### Add Mach or XPC
 
-Rejected. It would add compiled, macOS-only code and a second IPC model, which
-conflicts with public-inbox's compatibility and auditability goals.
+The proposal rejected a separate macOS transport. It would require compiled
+platform code and another IPC model to maintain and review.
 
-### Frame streams and give each endpoint a single owner
+### Give each stream one reader and one writer
 
-Recommended. Connection-oriented streams provide reliable delivery,
-backpressure, EOF, and `SCM_RIGHTS` on every target of interest. Changing the
-topology removes the ambiguity that framing alone cannot solve.
+This was the proposal's preferred option. Connected streams provide reliable
+delivery, backpressure, EOF, and descriptor passing on the target platforms.
+Separate ownership prevents readers and writers from dividing each other's
+frames. The later record-file design avoids this change to process ownership.
 
 ## Proposed architecture
 
-### Capability selection
+### Transport selection
 
-Probe functionality, not `$^O`:
+The proposal called for a lazy capability probe:
 
-1. Attempt `socketpair(AF_UNIX, SOCK_SEQPACKET, 0)` during lazy transport
-   initialization.
-2. Cache success for the process.
-3. Fall back only for errors that mean the socket type is unsupported, such as
-   `EPROTONOSUPPORT`, `EPROTOTYPE`, `EOPNOTSUPP`, or the platform-equivalent
-   `EINVAL`.
-4. Treat `EMFILE`, `ENFILE`, `ENOMEM`, `ENOBUFS`, and permission errors as
-   operational failures, not evidence that the protocol is unsupported.
+1. Try `socketpair(AF_UNIX, SOCK_SEQPACKET, 0)` during transport setup.
+2. Cache a successful result for the process.
+3. Fall back for unsupported-type errors, such as `EPROTONOSUPPORT`,
+   `EPROTOTYPE`, `EOPNOTSUPP`, or the platform's `EINVAL` result.
+4. Report `EMFILE`, `ENFILE`, `ENOMEM`, `ENOBUFS`, and permission errors as
+   operational failures. Do not use them to select a fallback.
 
-An optional startup self-test may round-trip one temporary descriptor to prove
-that the selected descriptor-passing implementation works. The main test suite
-must exercise this round trip directly.
+An optional startup check could transfer one temporary FD and read it back.
+The test suite would need to check that transfer directly. A test-only
+setting would force either transport without becoming an end-user setting.
 
-A test-only override should force either transport. It should not be a
-documented end-user compatibility switch.
+### Socket identity
 
-### Protocol identity and socket path
+Keep the existing sequence-packet path. Give the stream protocol a separate
+version and path. The proposed examples were:
 
-Keep the existing sequence-packet pathname for compatible clients. Give the
-stream protocol a different version and pathname, for example:
+| Protocol | Historical example |
+| --- | --- |
+| Existing sequence packet | `5.seq.sock` |
+| Proposed framed stream | `6.stream.sock` |
 
-- existing: `5.seq.sock`
-- proposed: `6.stream.sock`
+These are historical examples. The implemented record-file transport uses
+`5.stream.sock`. A distinct path prevents incompatible clients and daemons
+from connecting. Runtime selection also permits native sequence packets if
+a future Darwin version implements them.
 
-Including both protocol version and transport prevents an old client from
-connecting to a new daemon with incompatible parsing rules. A future Darwin
-implementation of `SOCK_SEQPACKET` can select the native path automatically.
+### Frame format
 
-### Stream record format
-
-Use a fixed-size, network-byte-order header. One possible 12-byte layout is:
+The proposed frame started with a fixed 12-byte header in network byte order:
 
 | Field | Size | Meaning |
 | --- | ---: | --- |
-| magic/version | 4 bytes | fixed protocol identifier |
-| payload length | 4 bytes | unsigned byte length |
-| descriptor count | 2 bytes | expected `SCM_RIGHTS` count |
-| record type/flags | 2 bytes | command, signal, response, or reserved flags |
+| Magic and version | 4 bytes | Fixed protocol identifier |
+| Payload length | 4 bytes | Unsigned byte length |
+| FD count | 2 bytes | Expected `SCM_RIGHTS` count |
+| Type and flags | 2 bytes | Command, signal, response, or reserved flags |
 
-Requirements:
+The proposed parser requirements were:
 
-- Reject unknown versions, reserved flags, oversized lengths, and impossible
-  descriptor counts before allocating payload storage.
-- Retain existing per-channel size limits. Large work requests may continue to
-  use a separately passed stream, but the control record that introduces that
-  stream is itself framed.
-- Every logical message, including `STOP`, `CONT`, `WINCH`, `umask`, exit
-  status, and empty completion records, is a frame.
-- EOF is valid only between frames. EOF in a header or payload is a protocol
+- Reject unknown versions, reserved flags, excessive lengths, and invalid FD
+  counts before allocating payload storage.
+- Keep the existing limits for each channel.
+- Allow large requests to use a separately passed stream. Frame the control
+  record that introduces that stream.
+- Frame every logical message, including `STOP`, `CONT`, `WINCH`, `umask`,
+  exit status, and empty completion records.
+- Accept EOF only between frames. Treat EOF within a header or payload as an
   error.
-- A zero-length logical payload is represented by a nonempty header; descriptor
-  transfer never depends on a zero-byte `sendmsg`.
+- Send a header even when the logical payload is empty. Do not depend on a
+  zero-byte `sendmsg` call to transfer descriptors.
 
-### Descriptor passing
+### Descriptor transfer
 
-For each frame:
+The proposed transfer procedure was:
 
-1. The first `sendmsg` includes the frame header, as much payload as practical,
-   and the complete `SCM_RIGHTS` control message.
-2. If it returns a short byte count, descriptors are not sent again. Remaining
-   bytes are written without ancillary data while the writer retains ownership
-   of the stream.
-3. The receiver calls `recvmsg` while collecting the header and saves any
-   ancillary descriptors in that frame's state.
-4. After the header is known, it reads exactly the declared payload length and
-   does not read into the next header.
-5. The receiver rejects `MSG_CTRUNC`, extra control messages, or a descriptor
-   count mismatch.
-6. Received descriptors get `FD_CLOEXEC` where the platform cannot request it
-   atomically.
-7. Every error path closes all descriptors already received for the incomplete
-   frame.
+1. Call `sendmsg` with the header, available payload, and all application FDs.
+2. After a short send, write the remaining bytes without sending the FDs again.
+   Keep exclusive write ownership until the frame is complete.
+3. Receive the header with `recvmsg`. Store the received FDs with that frame.
+4. Read exactly the declared payload length. Do not consume the next header.
+5. Reject `MSG_CTRUNC`, unexpected control messages, and FD count mismatches.
+6. Set `FD_CLOEXEC` when the platform cannot set it as part of the receive.
+7. On an error, close all descriptors received for the incomplete frame.
 
-### Single-owner invariant
+### Ownership
 
-Each stream has exactly one record reader and one record writer. Duplex use is
-allowed; ownership is directional.
+Each direction of a stream would have one record reader and one record writer.
+A duplex stream could use different owners for its two directions.
 
-For a `lei` client connection:
+For client connections:
 
-- `script/lei` owns client-to-daemon writes.
-- the daemon owns daemon-to-client writes;
-- workers report exit status, errors, pager/MUA requests, and barriers to the
-  daemon through internal channels rather than writing the client socket;
-- signal handlers enqueue work through a self-pipe or another async-safe wakeup
-  mechanism instead of interrupting an in-progress framed write.
+- `script/lei` would own writes to the daemon.
+- The daemon would own writes to the client.
+- Workers would report errors, exit status, pager requests, mail user agent
+  (MUA) requests, and barriers through the daemon.
+- Signal handlers would queue work through a self-pipe or another wakeup
+  mechanism safe for signal handlers. They would not interrupt a framed write.
 
 For `PktOp`:
 
-- allocate a separate producer stream for each worker during worker creation;
-- register every consumer end with the same operation table/event loop;
-- do not give several processes the same producer stream.
+- Create a separate stream for each producer when its worker starts.
+- Register each receive end with the common operation table and event loop.
+- Do not share one producer endpoint between processes.
 
 For work queues:
 
-- allocate one stream socketpair per worker;
-- retain the producer ends in the parent;
-- dispatch a complete frame to one available/writable worker;
-- queue in the parent when every worker is backpressured;
-- broadcast by sending one frame to each worker's channel;
-- reap/close one failed worker without desynchronizing the other workers.
+- Create one stream socket pair per worker.
+- Keep the producer endpoints in the parent.
+- Send a complete frame to one worker that can accept it.
+- Queue work in the parent when no worker can accept it.
+- Send broadcasts separately to every worker.
+- Close and reap a failed worker without disturbing other channels.
 
-This preserves load distribution without allowing multiple workers to consume
-parts of the same record. The implementation may begin with round-robin
-selection, but it must respect per-worker backpressure so one slow worker does
-not block unrelated workers.
+Round-robin dispatch could be the initial policy. It would need to respect
+backpressure so that one slow worker did not delay unrelated work.
 
-For the Xapian helper:
+The Xapian helper would also need one channel per worker. Until that change
+was ready, the stream path could use the direct Perl Xapian binding. The
+Perl and C++ helpers must check the actual socket type with `SO_TYPE`.
 
-- migrate it to the same one-channel-per-worker model; or
-- until that conversion is complete, decline to start the helper on the stream
-  fallback and use the direct Perl Xapian path.
+### Shutdown and failures
 
-The C and Perl helpers must never be told that a stream is a sequence-packet
-socket, and their existing `SO_TYPE` checks should remain meaningful.
+The proposed failure rules were:
 
-### Shutdown and failure behavior
+- Preserve the existing cancel or detach behavior when a client closes.
+- Stop only the affected worker on parent-to-worker EOF.
+- Keep a partial frame on one worker's channel from affecting another channel.
+- Close a channel after a partial frame. Close its received FDs and report the
+  failure. Restart the worker only when the existing policy requires it.
+- Keep unassigned work in the parent so another worker can receive it.
+- Retry assigned work only when existing command rules make a retry safe.
+  Do not replay a command that might already have run.
 
-- Closing a client stream cancels or detaches its work exactly as today.
-- Parent-to-worker EOF stops only that worker.
-- A worker that dies during a frame loses at most its assigned work; it cannot
-  corrupt another worker's channel.
-- A partial frame is never resynchronized heuristically. Close that channel,
-  close received descriptors, report the worker/client failure, and recreate
-  the worker if existing policy calls for it.
-- Queued but unassigned work remains in the parent and can be assigned to
-  another worker.
-- Once assignment begins, existing command idempotency rules determine whether
-  retry is safe. This RFC does not introduce transparent replay of a possibly
-  executed command.
+## Compatibility and validation
 
-## Compatibility and security considerations
+The native path would remain the default when the probe succeeds. The fallback
+would affect private local IPC for the same user. Runtime-directory permissions
+and `umask(077)` would remain required.
 
-- The native path remains the default wherever its runtime probe succeeds.
-- The fallback changes only private, same-user local IPC.
-- Existing runtime-directory permissions and `umask(077)` remain required.
-- Length and descriptor-count validation are mandatory even though clients are
-  trusted; malformed state must not cause unbounded allocation or descriptor
-  leaks.
-- The frame parser must not deserialize a payload until its complete declared
-  length has arrived.
-- No new CPAN module should be required. Both existing descriptor-passing
-  implementations, `Socket::MsgHdr` and the Inline::C/Spawn path, must be
-  covered.
-- Transport choice must not be inferred from an untrusted frame. It is fixed
-  by the socket path and the socket successfully created by both peers.
+Validate lengths and FD counts even for trusted clients. Do not deserialize
+an incomplete payload. Test both existing FD backends: the pure-Perl syscall
+implementation and Inline::C in `PublicInbox::Spawn`. No new CPAN module was
+required by this proposal.
 
-## Suggested implementation sequence
+Select the transport from the socket path and the successfully created socket.
+Do not infer it from data supplied in a frame.
 
-1. Add transport capability probing and a force-transport test hook, with no
-   behavior change on supported systems.
-2. Add a small framed-stream codec and exhaustive unit tests.
-3. Convert the `script/lei` to daemon connection, including owner-only writes
-   and signal wakeups.
-4. Add per-producer framed streams for `PktOp`.
-5. Add per-worker framed streams and parent dispatch for `PublicInbox::IPC`
-   work queues.
-6. Port the Perl and C/C++ Xapian helper paths, or explicitly disable the
-   helper until that patch lands.
-7. Update `lei-daemon`/`lei-store-format` documentation and the platform notes.
+## Historical implementation plan
 
-Each step should keep native sequence-packet tests passing. Patches that add
-the fallback should be independently force-testable on Linux.
+The proposal suggested this sequence:
 
-## Upstream email submission plan
+1. Add capability probing and a test override.
+2. Add a bounded framed-stream encoder and parser with unit tests.
+3. Convert client connections, including daemon-owned writes and signal wakeups.
+4. Give each `PktOp` producer a separate stream.
+5. Add per-worker streams and parent dispatch for `PublicInbox::IPC`.
+6. Port both Xapian helpers or explicitly disable incompatible helper use.
+7. Update `lei-daemon`, `lei-store-format`, and platform documentation.
 
-public-inbox is email-driven. Its
-[`HACKING`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/8a3c04bb01b243c28515df77e8ca647ec54dec01/HACKING)
-document asks contributors to send patches and request-pull messages to
-`meta@public-inbox.org`; the archive is at
-[`public-inbox.org/meta`](https://public-inbox.org/meta/).
+Each step would keep native sequence-packet tests passing. Tests would be
+able to force the fallback on Linux.
 
-Before writing the full patch series:
+## Historical upstream submission plan
 
-1. Send a plain-text design RFC with a subject similar to:
+Upstream's
+[`HACKING`](https://kernel.googlesource.com/pub/scm/infra/public-inbox/+/6d8fd320c878a99154e6b87c0360d56b7db46b27/HACKING)
+document directs patches and request-pull messages to `meta@public-inbox.org`.
+The discussion archive is at [public-inbox.org/meta](https://public-inbox.org/meta/).
+
+This proposal called for a design discussion before implementation:
+
+1. Send a plain-text RFC with this subject:
    `[RFC] lei: reliable IPC fallback for systems without SOCK_SEQPACKET`.
-2. State the Homebrew/macOS motivation, include the XNU evidence above, and
-   ask specifically whether maintainers prefer per-worker streams or a single
-   parent broker abstraction.
-3. Include small reproducer output showing that the constant exists but the
-   Darwin `socketpair` call fails.
-4. Link the archived RFC message from this repository after it appears.
-5. Reply-all to the thread; subscription is not required.
+2. Explain the macOS packaging need and include the XNU evidence.
+3. Ask whether maintainers prefer per-worker streams or a parent broker.
+4. Include a small reproducer showing the defined constant and failed Darwin
+   `socketpair` call.
+5. Add the archived discussion link to this repository. Use reply-all to keep
+   the discussion in one thread; subscription is not required.
 
-After design agreement:
+After agreement, the proposed procedure was:
 
-1. Rebase on current upstream `master`.
-2. Split the work into reviewable patches following the implementation
-   sequence above. Avoid a Homebrew-only downstream patch in the series.
-3. Generate inline patches with `git format-patch --cover-letter`; send them as
-   plain-text mail with `git send-email` to `meta@public-inbox.org`.
-4. Cc authors/reviewers found in the history of `IPC.pm`, `PktOp.pm`, `LEI.pm`,
-   and the Xapian helper. Preserve all recipients when replying.
-5. Put rationale and tests in each commit message. The cover letter should
-   include the compatibility matrix, actual macOS results, forced-stream Linux
-   results, and native sequence-packet regression results.
-6. For revisions, send a complete rerolled series (`v2`, `v3`, and so on) with
-   a concise change log and a range-diff when useful.
+1. Rebase on upstream `master`.
+2. Split the work into reviewable source changes. Keep Homebrew packaging
+   changes outside the upstream series.
+3. Generate patches with `git format-patch --cover-letter`.
+4. Review the plain-text files, then send them with `git send-email`.
+5. Copy relevant authors and reviewers from the affected file histories.
+   Retain recipients when replying.
+6. Explain the reason for each change and its tests in the commit message.
+7. Put actual macOS, forced-stream Linux, and native Linux results in the
+   cover letter. Include the compatibility matrix.
+8. For a revision, send the complete series with a version such as `v2`.
+   Include a change log and a range-diff when useful.
 
-Suggested series shape:
+The proposed seven-patch series was:
 
 ```text
 [PATCH 0/7] lei: support reliable IPC without SOCK_SEQPACKET
@@ -374,18 +345,18 @@ Suggested series shape:
 [PATCH 7/7] doc: describe portable lei IPC transports
 ```
 
-The exact split should follow maintainer feedback; the design RFC should be
-sent before committing to the most invasive worker-dispatch changes.
+This sequence is historical. Use the three-product-commit sequence in the
+[current RFC](macos-ipc-record-rfc.md#upstream-submission) for the implemented
+record-file design. Neither document establishes that upstream received or
+approved a series.
 
-## Open questions for upstream
+## Historical questions for upstream
 
-1. Should the stream fallback be a reusable `PublicInbox::IPC` record object or
-   remain private to the few affected call sites?
-2. Does upstream prefer one stream per worker or a dedicated broker process?
-3. Is direct Perl Xapian an acceptable first release fallback on Darwin while
-   the helper is converted?
-4. Should the test-only transport override be an environment variable or an
-   internal package variable localized by tests?
-5. Which existing worker-restart behavior should apply after a partial stream
-   frame or unexpected worker exit?
-6. Which macOS release floor is acceptable once real results are available?
+1. Should the fallback be a reusable `PublicInbox::IPC` object or stay private
+   to the affected callers?
+2. Should workers use separate streams or a broker process?
+3. Is direct Perl Xapian an acceptable initial fallback while helpers are ported?
+4. Should the test override use an environment variable or a localized package
+   variable?
+5. Which worker-restart policy should follow an incomplete frame or worker exit?
+6. Which minimum macOS version should the test results support?
