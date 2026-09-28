@@ -39,6 +39,9 @@ The formula fixes the source archive and each Perl/Xapian resource to a version
 and SHA-256 checksum. Homebrew fetches these archives before the build.
 The formula blocks network access during the build.
 
+The packaged dependencies cover upstream's `lei` profile. Optional server
+dependencies, such as Plack for `public-inbox-httpd`, are not included.
+
 Upstream has both an `INSTALL` file and an `install/` directory. These names
 conflict on the default macOS filesystem, which ignores letter case.
 The source archive omits `install/`. This directory contains Linux package

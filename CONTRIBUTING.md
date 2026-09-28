@@ -7,7 +7,7 @@ Keep the tap close to upstream public-inbox.
 
 Use a style based on
 [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/STE_faq.html).
-This repository does not claim full compliance with the standard's dictionary.
+This repository does not claim full compliance with the standard.
 
 - Write short sentences with one main idea.
 - Use the active voice and name the component that performs an action.
@@ -26,7 +26,8 @@ Keep the license text unchanged.
 - Use a canonical upstream release when it includes the required fixes.
 - Until then, use the fork snapshot described below.
 - Do not download required code during `install`, `post_install`, or runtime.
-- Declare each required Perl dependency as a resource with a checksum.
+- Declare each required module that Perl does not include as a resource with
+  a checksum.
 - Put each resource after the resources that it needs to build.
 - Match `xapian-bindings` to the installed Homebrew `xapian` version.
 - Increase the formula `revision` when the installed package changes without
@@ -46,18 +47,18 @@ The upstream `INSTALL` file conflicts with the `install/` directory on a
 filesystem that ignores letter case. The packaging script omits `install/`
 from the archive. It reads Git objects and does not change the source checkout.
 
-To reproduce the current archive:
+Run these steps from this tap's directory to reproduce the current archive:
 
 1. Clone the source fork without a checkout, or use an existing clone:
 
    ```sh
-   git clone --no-checkout https://github.com/tdmackey/public-inbox.git public-inbox-source
+   git clone --no-checkout https://github.com/tdmackey/public-inbox.git ../public-inbox-source
    ```
 
-2. From this tap's directory, run:
+2. Create the archive:
 
    ```sh
-   sh scripts/package-source.sh public-inbox-source \
+   sh scripts/package-source.sh ../public-inbox-source \
      7b106f5fa70585820cfeb937a62ad7ac25ede312 \
      2.1.0-62-g7b106f5f
    ```
@@ -112,7 +113,7 @@ For formula checks, put this checkout in Homebrew's tap directory.
 Run these commands on macOS or Linux:
 
 ```sh
-brew style tdmackey/public-inbox/public-inbox
+brew style tdmackey/public-inbox
 brew audit --strict --online tdmackey/public-inbox/public-inbox
 HOMEBREW_NO_INSTALL_FROM_API=1 \
   brew install --build-from-source tdmackey/public-inbox/public-inbox

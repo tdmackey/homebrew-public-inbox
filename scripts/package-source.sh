@@ -69,7 +69,7 @@ then
   exit 1
 fi
 if printf '%s\n' "${listing}" | grep -Fqx \
-    -e "public-inbox-${version}/install" -e "public-inbox-${version}/install/"
+      -e "public-inbox-${version}/install" -e "public-inbox-${version}/install/"
 then
   echo "archive unexpectedly contains the case-colliding install/ directory" >&2
   exit 1

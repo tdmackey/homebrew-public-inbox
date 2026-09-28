@@ -1,176 +1,211 @@
-# RFC: record-preserving `lei` IPC without `SOCK_SEQPACKET`
+# RFC: preserve `lei` records without `SOCK_SEQPACKET`
 
-Status: implemented in the portability fork; pending upstream review
-Audience: public-inbox maintainers, downstream packagers, and contributors
+Status: implemented in the portability fork; prepared for upstream review.
 
-## Summary
+Audience: public-inbox maintainers, package maintainers, and contributors.
 
-public-inbox and `lei` prefer `AF_UNIX SOCK_SEQPACKET` because one send maps
-to one receive, `SCM_RIGHTS` descriptors stay attached to their record, and a
-shared endpoint can safely distribute work among processes. Darwin exposes
-the constant but does not implement UNIX-domain sequence-packet sockets.
+## Scope and terms
 
-The portability fork keeps the existing sequence-packet path and wire format
-unchanged when a runtime probe succeeds. If the socket type is unsupported,
-it selects `SOCK_STREAM` and carries every logical message as an anonymous,
-descriptor-backed record:
+This document describes product commit
+[`7b106f5f`](https://github.com/tdmackey/public-inbox/commit/7b106f5fa70585820cfeb937a62ad7ac25ede312).
+The Homebrew formula uses that commit. The
+[test matrix](macos-ipc-test-matrix.md) defines the required evidence. It does
+not certify that all tests have passed.
 
-1. write a small header and the complete payload to an anonymous regular file;
-2. reset the file offset;
-3. send one NUL notification byte with `SCM_RIGHTS`, placing the record file
-   first and the existing application descriptors after it;
-4. receive exactly one byte, validate and read the record file, then return
-   only the application descriptors to the existing caller.
+| Term | Meaning in this document |
+| --- | --- |
+| IPC | Interprocess communication: data transfer between processes. |
+| Record | One complete logical message. |
+| FD | File descriptor: a process handle for an open file, pipe, or socket. |
+| Application FD | A descriptor that the caller sends with a record. |
+| Record FD | The descriptor for the anonymous file that holds a stream record. |
+| `SCM_RIGHTS` | Socket control data that transfers file descriptors. |
+| Backpressure | A condition in which a sender must wait because the receiver cannot accept more data. |
 
-A one-byte stream send cannot be short. The kernel associates the ancillary
-descriptor set with that byte, so concurrent writers cannot interleave a
-record and concurrent readers cannot split one. A writer that dies before the
-send publishes nothing; a writer that dies after it publishes a complete
-record. This retains the shared-reader/shared-writer topology instead of
-adding brokers, cross-process locks, or one socketpair per worker.
+## Operation
 
-## Why this design
+public-inbox and `lei` prefer `AF_UNIX SOCK_SEQPACKET`. This socket type keeps
+each message and its descriptors together. Processes can share an endpoint
+to distribute complete work records. On the macOS systems targeted by this
+port, Darwin defines `SOCK_SEQPACKET` but does not implement it for UNIX sockets.
 
-### Not `SOCK_DGRAM`
+The fork first tries a sequence-packet socket. If that operation succeeds,
+the fork uses the existing protocol. If the socket type is unsupported, the
+fork selects `SOCK_STREAM`.
 
-Darwin UNIX datagrams preserve message boundaries but may silently discard a
-datagram when the receive queue is full. Lost work, completion, or barrier
-records are unacceptable. Datagram sockets also do not provide stream-style
-EOF semantics.
+The stream transport uses this sequence for each record:
 
-### Not ordinary length-prefixed stream frames
+1. Write an eight-byte header and the complete payload to an anonymous file.
+2. Set the file offset to zero.
+3. Send one NUL byte with `SCM_RIGHTS`. Put the record FD first, followed by
+   the application FDs.
+4. Receive exactly one byte and its descriptors.
+5. Validate the record file and read its contents.
+6. Return the payload and application FDs to the caller. Close the record FD.
 
-A byte-stream frame plus a mutex is insufficient for the current topology.
-Several readers can divide a header and payload; several writers can splice
-short writes; a writer can die after a partial frame; and a Perl safe signal
-handler can re-enter a non-reentrant writer lock. Once a partial frame exists,
-the next valid frame cannot be recovered without a more elaborate poison and
-resynchronization protocol.
+A successful one-byte send transfers the complete notification. There is no
+short positive byte count. The kernel transfers the descriptors with that
+byte. Thus, concurrent writers do not mix record contents, and concurrent
+readers do not divide a record.
 
-### Not a worker broker
+If a writer exits before the notification, it publishes no record. If the
+notification succeeds, the receiver can read the complete file after the
+writer exits. This design retains the existing shared endpoints.
 
-A parent broker or one stream per producer/worker can be correct, but it
-rewrites work distribution, backpressure, broadcasts, cancellation, and
-worker lifecycle. Descriptor-backed records preserve the current architecture
-and keep the portability patch reviewable.
+## Design choices
 
-## Capability selection
+### Datagram sockets
 
-Selection is based on the operation, not `$^O`:
+Darwin UNIX datagrams preserve message boundaries. However, XNU documents
+possible data loss when a receive queue is full. See the
+[Darwin evidence](macos-ipc-rfc.md#darwin-evidence) in the earlier proposal.
+Loss of work, completion, or barrier records can leave a command incomplete.
+Datagrams also lack the end-of-file (EOF) behavior of a connected stream.
 
-- try `socket` or `socketpair` with `AF_UNIX SOCK_SEQPACKET`;
-- use it unchanged on success;
-- fall back only for unsupported-protocol errors such as
-  `EPROTONOSUPPORT`, `ESOCKTNOSUPPORT`, `EPROTOTYPE`, `EOPNOTSUPP`,
-  `EAFNOSUPPORT`, or the platform's `EINVAL` result;
-- report resource exhaustion and other operational failures rather than
-  silently changing transports.
+### Length-prefixed stream frames
 
-`PI_TEST_LEI_STREAM=1` is a test hook that forces the fallback on Linux. It is
-not a documented end-user compatibility switch.
+A length prefix and a mutex do not meet the requirements for shared endpoints.
+Several readers can divide a header and its payload. Several writers can mix
+partial writes. A writer can exit after it sends part of a frame.
 
-Named `lei` sockets remain transport-specific:
+A Perl signal handler can also interrupt a writer and try to acquire its lock
+again. Recovery from a partial frame would require another protocol to reject
+the damaged channel or find the next valid boundary.
 
-- sequence packet: `5.seq.sock`
-- descriptor-backed stream: `5.stream.sock`
+### A broker or separate worker streams
 
-The distinct path prevents a client from connecting to a daemon that expects
-the other private protocol.
+A parent broker, or one stream per producer and worker, can preserve records.
+Either design changes work distribution, backpressure, broadcasts,
+cancellation, and worker shutdown. The record-file design keeps the existing
+process relationships and limits the size of the portability change.
+
+## Transport selection
+
+`PublicInbox::IPCSocket` selects the transport when it creates a socket or
+socket pair. It does not select by operating-system name (`$^O`).
+
+1. Try `socket` or `socketpair` with `AF_UNIX SOCK_SEQPACKET`.
+2. Use that socket if the operation succeeds.
+3. Select `SOCK_STREAM` only after an unsupported-protocol error.
+4. Report resource exhaustion and other operational errors to the caller.
+
+The recognized unsupported-protocol errors are `EPROTONOSUPPORT`,
+`ESOCKTNOSUPPORT`, `EPROTOTYPE`, `EOPNOTSUPP`, `EAFNOSUPPORT`, and `EINVAL`.
+The last error covers platforms that use `EINVAL` for the unsupported type.
+
+For tests, `PI_TEST_LEI_STREAM=1` forces the stream transport. This variable is
+a test hook. It is not a supported end-user setting.
+
+Named `lei` sockets use different paths for the two transports:
+
+| Transport | Socket filename |
+| --- | --- |
+| Sequence packet | `5.seq.sock` |
+| Stream record | `5.stream.sock` |
+
+The paths prevent a client from connecting to a daemon that expects the other
+protocol.
 
 ## Record protocol
 
-The anonymous record file begins with an eight-byte header:
+The anonymous file starts with this eight-byte header:
 
 | Field | Size | Encoding |
 | --- | ---: | --- |
-| magic and version | 4 bytes | `PI\\0\\1` |
-| application FD count | 4 bytes | network-order unsigned integer |
+| Magic and version | 4 bytes | `PI\0\1`: hexadecimal bytes `50 49 00 01` |
+| Application FD count | 4 bytes | Unsigned integer in network byte order |
 
-The payload is every remaining byte in the file, so payload length is derived
-from `fstat(2)`. This avoids a 32-bit length ceiling and retains the existing
-large-request behavior. Empty logical payloads remain reserved for EOF in
-current callers and are rejected when sending a stream record.
+All remaining bytes form the payload. The receiver uses `fstat(2)` to get
+the file size. The header therefore adds no 32-bit payload-length limit.
+Existing callers reserve an empty payload for EOF. The stream sender rejects
+an empty logical payload.
 
-The notification carries, in order:
+Each notification carries the record FD and zero to ten application FDs.
+Both descriptor-passing backends can hold eleven FDs. The extra slot keeps
+the existing capacity of ten application FDs available to the stream caller.
+The receiver verifies the application FD count and hides the record FD from
+the caller.
 
-1. the anonymous record file descriptor;
-2. zero to ten application file descriptors.
+The receiver reports a protocol error for:
 
-Both existing SCM backends are raised from ten to eleven total descriptors so
-the stream record does not reduce the sequence-packet API's ten-descriptor
-limit. The receiver checks that the header count matches the application
-descriptor count and hides the record descriptor from callers.
+- A notification byte other than NUL.
+- A missing record FD.
+- A record FD that is not a readable and writable regular file.
+- An incomplete header or an unknown magic or version.
+- An empty payload.
+- A record that exceeds a receive site's explicit size limit.
+- A declared FD count that differs from the received application FD count.
 
-Malformed tokens, non-regular record descriptors, truncated headers, bad
-versions, oversized records for bounded receive sites, and descriptor-count
-mismatches are fatal protocol errors. Lexical handle cleanup closes every
-received descriptor on an exception.
+Received handles have local scope. Their cleanup closes them if record
+validation raises an exception.
 
-## Concurrency and failure properties
+## Concurrency and failure behavior
 
-- A record publication is one `sendmsg(2)` with one data byte.
-- `EAGAIN` returns immediately and publishes no partial record.
-- `ENOBUFS`, `ENOMEM`, and `ETOOMANYREFS` remain retryable in nonblocking work
-  queues; FD-pressure retries use a timer because the stream may still appear
-  writable.
-- Multiple writers may share one endpoint without a userspace mutex.
-- Multiple workers may block in `recvmsg(1)` on one endpoint; one worker gets
-  the notification and its complete ancillary set.
-- EOF can occur only between notifications, so no partial parser state exists.
-- The native sequence-packet implementation and its raw wire format are not
-  changed.
+- One `sendmsg(2)` call publishes one notification byte.
+- A nonblocking send that returns `EAGAIN` publishes no record.
+- Nonblocking work queues can retry `ENOBUFS`, `ENOMEM`, and `ETOOMANYREFS`.
+- Descriptor-pressure retries use a timer. A socket can still appear writable
+  while descriptor transfer cannot proceed.
+- Several writers can share one endpoint without a cross-process mutex.
+- Several workers can wait on the receive endpoint. Each worker requests one
+  byte with `recvmsg(2)` and receives the associated descriptors.
+- EOF occurs between notifications. The receiver has no partial stream frame
+  to retain.
+- The native sequence-packet wire format stays the same.
 
 ## Component behavior
 
-- `script/lei` and `PublicInbox::LEI` select matching socket paths/types and
-  route commands, signals, `umask`, execution requests, and exit status through
-  the transport-neutral send/receive wrappers.
-- work queues and `PktOp` keep their existing producer/consumer topology.
-- the Perl Xapian helper can consume descriptor-backed records, including with
-  multiple workers.
-- the C++ Xapian helper remains sequence-packet-only. `lei` uses its packaged
-  direct Perl Xapian binding on the stream path rather than launching an
-  incompatible helper.
+| Component | Stream behavior |
+| --- | --- |
+| `script/lei` and `PublicInbox::LEI` | Select matching socket types and paths. Use common send and receive functions for commands, signals, `umask`, execution requests, and exit status. |
+| Work queues and `PktOp` | Retain their existing producer and consumer relationships. |
+| Perl Xapian helper | Accepts record files, including when several workers share an endpoint. |
+| C++ Xapian helper | Requires sequence-packet sockets. `lei` uses the direct Perl Xapian binding on the stream transport. |
 
-The fallback requires working `SCM_RIGHTS`. That was already required by the
-affected `lei` IPC paths; the Homebrew formula packages the Inline::C backend.
+The fallback requires `SCM_RIGHTS`. The affected `lei` paths already require
+descriptor passing. The Homebrew formula includes the Inline::C backend.
 
 ## Cost and compatibility
 
-The fallback creates and writes an anonymous temporary file per logical
-record. That is intentionally more expensive than `SOCK_SEQPACKET`, which
-remains preferred everywhere it works. The file is unlinked by construction,
-never named in the user's store, and closed after the notification is sent and
-consumed.
+The stream transport creates and writes one anonymous temporary file per
+record. This adds work compared with `SOCK_SEQPACKET`, which remains the first
+choice. The file has no persistent pathname in the user's store. The sender
+closes its handle after the send; the receiver closes its handle after reading.
 
 The design adds no network protocol, daemon privilege, non-core Perl module,
-or macOS-only framework. It retains Perl 5.12 syntax and is testable on Linux.
+or macOS framework. It uses Perl 5.12 syntax. Tests can force it on Linux.
 
 ## Required evidence
 
-The source branch gates publication on:
+Collect these results before release:
 
-- native sequence-packet and forced-stream Linux runs;
-- automatic fallback on the current Apple Silicon macOS runner;
-- both pure-Perl syscall and Inline::C SCM backends;
-- 10-descriptor success and deterministic 11-descriptor rejection;
-- immediate nonblocking `EAGAIN` with no phantom receive record;
-- injected `ETOOMANYREFS` retry classification;
-- concurrent passed-FD writers under backpressure;
-- concurrent shared readers with exact payload/FD association;
-- `t/ipc.t`, `t/cmd_ipc.t`, `t/xap_helper.t`, `t/lei-daemon.t`, `t/lei.t`,
-  the focused stream tests, and the full upstream test suite;
-- an end-to-end `lei import` and query through the Homebrew formula.
+- Native sequence-packet and forced-stream runs on Linux.
+- Automatic fallback on the Apple Silicon macOS runner.
+- Tests of both the pure-Perl syscall and Inline::C descriptor backends.
+- Successful transfer of ten application FDs and rejection of eleven.
+- Immediate `EAGAIN` from a saturated nonblocking sender, with no extra record
+  at the receiver.
+- Correct retry handling after an injected `ETOOMANYREFS` error.
+- Concurrent writers with passed FDs under backpressure.
+- Concurrent readers, with each payload matched to its FDs.
+- Focused tests: `t/ipc-socket.t`, `t/ipc-stream.t`, `t/lei-stream.t`,
+  `t/ipc.t`, `t/cmd_ipc.t`, `t/xap_helper.t`, `t/lei-daemon.t`, and `t/lei.t`.
+- The full upstream test suite, with failures, skips, and exclusions reported.
+- An installed-formula test that imports a message with `lei` and queries it.
 
-The detailed host and fault matrix is in
-[`macos-ipc-test-matrix.md`](macos-ipc-test-matrix.md).
+The [test matrix](macos-ipc-test-matrix.md) gives the host requirements, fault
+cases, commands, and result template. Passing the formula test alone does
+not satisfy that matrix.
 
 ## Upstream submission
 
-public-inbox accepts patches by email at `meta@public-inbox.org`. The fork
-keeps the source work based directly on upstream `master`. A separate fork-only
-commit contains the GitHub CI harness and a Darwin test-expectation adjustment.
-The proposed product source series is:
+public-inbox accepts patches at `meta@public-inbox.org`. The source series
+starts from upstream commit `6d8fd320c878a99154e6b87c0360d56b7db46b27`.
+The three product commits end at `7b106f5f`. Later fork commits contain the
+GitHub CI setup and a Darwin test adjustment; exclude them from the product
+series.
+
+The proposed subjects are:
 
 ```text
 [PATCH 0/3] lei: support reliable IPC without SOCK_SEQPACKET
@@ -179,18 +214,27 @@ The proposed product source series is:
 [PATCH 3/3] lei: use portable local IPC transports
 ```
 
-Generate the series with `git format-patch --cover-letter`, include native and
-forced Linux results plus the current Apple Silicon macOS runner result, and
-send the plain-text series with `git send-email`. The Homebrew tap pins the
-reviewed fork commit only until upstream merges and releases the change.
+In the source fork, generate the three patches and a cover letter:
 
-## Upstream questions
+```sh
+git format-patch --cover-letter \
+  6d8fd320c878a99154e6b87c0360d56b7db46b27..7b106f5fa70585820cfeb937a62ad7ac25ede312
+```
 
-1. Is an anonymous record file per stream message acceptable for the macOS
-   fallback, given that the native fast path remains unchanged?
-2. Should the stream protocol magic/version live in `PublicInbox::IPC` or a
-   smaller transport module?
-3. Is direct Perl Xapian the preferred fallback while the C++ helper remains
-   sequence-packet-only?
-4. Does upstream want the test override as an environment variable or a
-   localized package variable?
+Add the native Linux, forced-stream Linux, and Apple Silicon macOS results
+to the cover letter. Identify all excluded tests. Review the generated files
+before sending the plain-text series with `git send-email`.
+
+The tap keeps the immutable fork snapshot until an upstream release includes
+the change. These instructions do not establish that a series has been sent
+or reviewed.
+
+## Questions for upstream
+
+1. Is one anonymous record file per stream message an acceptable fallback cost?
+2. Should the record magic and version stay in `PublicInbox::IPC`, or move to
+   a smaller transport module?
+3. Is direct Perl Xapian the preferred fallback while the C++ helper requires
+   sequence-packet sockets?
+4. Should tests use an environment variable or a localized package variable
+   to force the transport?
