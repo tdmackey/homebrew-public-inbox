@@ -5,16 +5,16 @@ class PublicInbox < Formula
   version "2.1.0-62-g7b106f5f"
   sha256 "a702d9446e6543b391ace86284cc3e4e72e49f68c0a3ebc19b18bf80be4d5993"
   license "AGPL-3.0-or-later"
+  revision 1
 
-  # Temporary immutable, case-safe fork snapshot. It omits only upstream's
-  # install/ package-manager helpers, whose name collides with the required
-  # INSTALL document on default macOS filesystems. Return to an upstream
-  # release archive after the portable IPC series is merged and released.
+  # This fixed source archive excludes the install/ package-manager helpers.
+  # The install/ directory conflicts with INSTALL on default macOS filesystems.
+  # Use an upstream release after it includes the portable IPC changes.
   livecheck do
     skip "pinned development snapshot"
   end
 
-  # pkgconf is needed at runtime when XapHelperCxx builds its per-user cache.
+  # XapHelperCxx uses pkgconf to build its cache when the command runs.
   depends_on "git"
   depends_on "openssl@3"
   depends_on "perl"
@@ -27,15 +27,15 @@ class PublicInbox < Formula
     depends_on "zlib-ng-compat"
   end
 
-  # Homebrew's xapian formula does not install the Perl binding. Keep this
-  # resource exactly aligned with Formula["xapian"].version.
+  # Homebrew's xapian formula does not install the Perl binding.
+  # Keep this resource at the same version as Formula["xapian"].
   resource "xapian-bindings" do
     url "https://oligarchy.co.uk/xapian/2.1.0/xapian-bindings-2.1.0.tar.xz"
     sha256 "f52ec189f13b4fa66ea625a6eb94bb32dd651b9ec806be6a911dda54cbe3875c"
   end
 
-  # Runtime/build closure for the upstream `lei` dependency profile. These are
-  # ordered so every non-core prerequisite is installed before its consumer.
+  # Install the build and runtime dependencies for upstream's lei profile.
+  # Install each prerequisite before the resource that needs it.
   resource "MIME-Base32" do
     url "https://cpan.metacpan.org/authors/id/R/RE/REHSACK/MIME-Base32-1.303.tar.gz"
     sha256 "ab21fa99130e33a0aff6cdb596f647e5e565d207d634ba2ef06bdbef50424e99"
@@ -112,9 +112,8 @@ class PublicInbox < Formula
     sha256 "093c97fac15b47a8fe4d2936ef2df377abf77cc8ab74092d2128bb945d1fb46f"
   end
 
-  # lei's daemon uses a local AF_UNIX socket during the functional test.
-  # Homebrew's Darwin network sandbox blocks that bind along with internet
-  # access, so keep the source build isolated while allowing local test IPC.
+  # The lei test uses a local AF_UNIX socket. The macOS network sandbox blocks
+  # this socket. Block network access during the build only.
   deny_network_access! :build
 
   def install
@@ -144,15 +143,14 @@ class PublicInbox < Formula
       system "make", "install"
     end
 
-    # CPAN resources must be declared above in dependency order. Keep the
-    # separately configured xapian-bindings resource out of this MakeMaker loop.
+    # Install CPAN resources in the order above. The Xapian binding uses
+    # configure, so exclude it from this loop.
     resources.reject { |resource| resource.name == "xapian-bindings" }.each do |resource|
       resource.stage do
         if File.exist? "Makefile.PL"
           args = ["INSTALL_BASE=#{libexec}"]
           if resource.name == "DBD-SQLite"
-            # Upstream intentionally leaves system SQLite selection to
-            # downstream packagers. Enable its guarded SQLITE_LOCATION path.
+            # Enable upstream's packager option to use Homebrew's SQLite.
             inreplace "Makefile.PL", "if ( 0 ) {", "if ( 1 ) {"
             args << "SQLITE_LOCATION=#{formula_opt_prefix("sqlite")}"
           end
@@ -169,11 +167,12 @@ class PublicInbox < Formula
       end
     end
 
-    # Install into bin first; env_script_all_files moves the scripts under
-    # libexec and replaces them with wrappers carrying the packaged PERL5LIB.
+    # Install scripts in bin. Then move them to libexec/bin and add wrappers
+    # that set PERL5LIB. Upstream's install-man target uses INSTALLMAN1DIR.
     system "perl", "Makefile.PL", "INSTALL_BASE=#{libexec}",
                                  "INSTALLSCRIPT=#{script_dir}",
                                  "INSTALLSITESCRIPT=#{script_dir}",
+                                 "INSTALLMAN1DIR=#{man1}",
                                  "INSTALLSITEMAN1DIR=#{man1}",
                                  "INSTALLSITEMAN3DIR=#{man3}"
     system "make"
@@ -189,10 +188,14 @@ class PublicInbox < Formula
     ENV["HOME"] = testpath
     runtime_dir = testpath/"run"
     ENV["XDG_RUNTIME_DIR"] = runtime_dir
-    ENV.prepend_path "PERL5LIB", libexec/"lib/perl5"
 
-    system formula_opt_bin("perl")/"perl", "-MFile::FcntlLock",
+    system formula_opt_bin("perl")/"perl", "-I#{libexec}/lib/perl5", "-MFile::FcntlLock",
            "-MIO::Socket::SSL", "-MMail::IMAPClient", "-e", "exit 0"
+
+    assert_path_exists man1/"lei.1"
+    assert_path_exists man5/"public-inbox-config.5"
+    assert_path_exists man7/"lei-overview.7"
+    assert_path_exists man8/"lei-daemon.8"
 
     inbox = testpath/"inbox"
     system bin/"public-inbox-init", "-V2", "brew-test", inbox,
@@ -200,10 +203,8 @@ class PublicInbox < Formula
     assert_path_exists inbox/"git/0.git"
     system bin/"public-inbox-index", inbox
 
-    # Homebrew's Linux bubblewrap sandbox denies opening `/`, which the
-    # persistent lei/store worker uses to release its caller's working
-    # directory. The source CI covers lei on Linux outside that policy; the
-    # tap's target macOS platforms exercise the complete daemon workflow.
+    # Homebrew's Linux sandbox blocks the lei/store worker from opening /.
+    # Test the full daemon workflow on macOS. The source CI tests lei on Linux.
     if OS.mac?
       message = testpath/"message.eml"
       message.write <<~EOS
