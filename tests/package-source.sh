@@ -75,7 +75,8 @@ cmp "${output}" "${test_dir}/repeat.tar.gz" || fail 'archive is not reproducible
 
 # Version labels are literal strings, including regular-expression characters.
 sh "${package_script}" "${repo}" "${commit}" '1.0[rc1]' "${test_dir}/literal.tar.gz" >/dev/null
-tar -tf "${test_dir}/literal.tar.gz" | grep -Fqx 'public-inbox-1.0[rc1]/INSTALL' || fail 'version was not literal'
+listing=$(tar -tf "${test_dir}/literal.tar.gz")
+printf '%s\n' "${listing}" | grep -Fqx 'public-inbox-1.0[rc1]/INSTALL' || fail 'version was not literal'
 
 cp "${output}" "${test_dir}/original.tar.gz"
 expect_failure() {
